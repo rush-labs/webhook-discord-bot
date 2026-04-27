@@ -205,84 +205,18 @@ async function buildNotification(payload: WebhookPayload): Promise<Notification 
                 description: "Render could not pull the container image for this service.",
                 includeLogsButton: true,
             }
-        case "build_ended": {
-            const event = await fetchEventInfo(payload)
-            const status = String(event.details?.status ?? "")
-            if (isFailedStatus(status)) {
-                return {
-                    severity: "failure",
-                    title: "Build Failed",
-                    description: `Build ${status}.`,
-                    includeLogsButton: true,
-                }
-            }
-            return null
-        }
-        case "deploy_ended": {
-            const event = await fetchEventInfo(payload)
-            const status = String(event.details?.status ?? "")
-            if (isFailedStatus(status)) {
-                return {
-                    severity: "failure",
-                    title: "Deploy Failed",
-                    description: `Deploy ${status}.`,
-                    includeLogsButton: true,
-                }
-            }
-            return null
-        }
-        case "zero_downtime_redeploy_ended": {
-            const event = await fetchEventInfo(payload)
-            const status = String(event.details?.status ?? "")
-            if (isFailedStatus(status)) {
-                return {
-                    severity: "failure",
-                    title: "Zero-Downtime Redeploy Failed",
-                    description: `Redeploy ${status}.`,
-                    includeLogsButton: true,
-                }
-            }
-            return null
-        }
-        case "pre_deploy_ended": {
-            const event = await fetchEventInfo(payload)
-            const status = String(event.details?.status ?? "")
-            if (isFailedStatus(status)) {
-                return {
-                    severity: "failure",
-                    title: "Pre-deploy Failed",
-                    description: `Pre-deploy ${status}.`,
-                    includeLogsButton: true,
-                }
-            }
-            return null
-        }
-        case "cron_job_run_ended": {
-            const event = await fetchEventInfo(payload)
-            const status = String(event.details?.status ?? "")
-            if (isFailedStatus(status)) {
-                return {
-                    severity: "failure",
-                    title: "Cron Job Failed",
-                    description: `Run ${status}.`,
-                    includeLogsButton: true,
-                }
-            }
-            return null
-        }
-        case "job_run_ended": {
-            const event = await fetchEventInfo(payload)
-            const status = String(event.details?.status ?? "")
-            if (isFailedStatus(status)) {
-                return {
-                    severity: "failure",
-                    title: "Job Run Failed",
-                    description: `Job ${status}.`,
-                    includeLogsButton: true,
-                }
-            }
-            return null
-        }
+        case "build_ended":
+            return endedEventNotification(payload, "Build Failed", "Build")
+        case "deploy_ended":
+            return endedEventNotification(payload, "Deploy Failed", "Deploy")
+        case "zero_downtime_redeploy_ended":
+            return endedEventNotification(payload, "Zero-Downtime Redeploy Failed", "Redeploy")
+        case "pre_deploy_ended":
+            return endedEventNotification(payload, "Pre-deploy Failed", "Pre-deploy")
+        case "cron_job_run_ended":
+            return endedEventNotification(payload, "Cron Job Failed", "Run")
+        case "job_run_ended":
+            return endedEventNotification(payload, "Job Run Failed", "Job")
 
         // ---------- Service availability / lifecycle ----------
         case "server_available":
@@ -477,9 +411,47 @@ async function buildNotification(payload: WebhookPayload): Promise<Notification 
     }
 }
 
-function isFailedStatus(status: string): boolean {
-    const s = status.toLowerCase()
-    return s.includes("fail") || s === "build_failed" || s === "update_failed" || s === "canceled"
+// Render's /v1/events/{id} can return status as either a string ("succeeded",
+// "live", "build_failed") or a numeric enum. Treat anything not clearly a
+// success as a failure so on-call gets pinged on real failures even if the
+// status format shifts under us.
+async function endedEventNotification(
+    payload: WebhookPayload,
+    failureTitle: string,
+    noun: string,
+): Promise<Notification | null> {
+    const event = await fetchEventInfo(payload)
+    console.log(`${payload.type} details: ${JSON.stringify(event.details)}`)
+    const status = event.details?.status
+
+    if (isSuccessStatus(status)) return null
+    if (isInProgressStatus(status)) return null
+
+    return {
+        severity: "failure",
+        title: failureTitle,
+        description: status !== undefined && status !== null
+            ? `${noun} did not succeed (status: ${status}).`
+            : `${noun} did not succeed.`,
+        includeLogsButton: true,
+    }
+}
+
+function isSuccessStatus(status: unknown): boolean {
+    if (typeof status === "number") {
+        // observed Render numeric codes for success
+        return status === 1 || status === 4
+    }
+    const s = String(status ?? "").toLowerCase()
+    return s === "succeeded" || s === "success" || s === "live" || s === "deactivated"
+}
+
+function isInProgressStatus(status: unknown): boolean {
+    if (typeof status === "number") {
+        return status === 2 || status === 3 || status === 9
+    }
+    const s = String(status ?? "").toLowerCase()
+    return s === "created" || s.includes("in_progress") || s === "building"
 }
 
 function describeServerFailure(reason: any): string {
