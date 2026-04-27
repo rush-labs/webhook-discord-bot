@@ -184,10 +184,11 @@ async function buildNotification(payload: WebhookPayload): Promise<Notification 
         // ---------- Failures ----------
         case "server_failed": {
             const event = await fetchEventInfo(payload)
+            console.log(`server_failed details: ${JSON.stringify(event.details)}`)
             return {
                 severity: "failure",
                 title: "Server Failed",
-                description: describeServerFailure(event.details?.reason),
+                description: describeFailureReason(event.details?.reason) ?? "Failed for unknown reason",
                 includeLogsButton: true,
             }
         }
@@ -411,10 +412,9 @@ async function buildNotification(payload: WebhookPayload): Promise<Notification 
     }
 }
 
-// Render's /v1/events/{id} can return status as either a string ("succeeded",
-// "live", "build_failed") or a numeric enum. Treat anything not clearly a
-// success as a failure so on-call gets pinged on real failures even if the
-// status format shifts under us.
+// Render returns event-specific string fields like deployStatus/buildStatus
+// alongside a numeric `status` enum. We check both — if any string status
+// field contains "fail" or "cancel", we send a failure notification.
 async function endedEventNotification(
     payload: WebhookPayload,
     failureTitle: string,
@@ -422,45 +422,40 @@ async function endedEventNotification(
 ): Promise<Notification | null> {
     const event = await fetchEventInfo(payload)
     console.log(`${payload.type} details: ${JSON.stringify(event.details)}`)
-    const status = event.details?.status
 
-    if (isSuccessStatus(status)) return null
-    if (isInProgressStatus(status)) return null
+    if (!isFailedDetail(event.details)) return null
 
+    const reason = describeFailureReason(event.details?.reason)
     return {
         severity: "failure",
         title: failureTitle,
-        description: status !== undefined && status !== null
-            ? `${noun} did not succeed (status: ${status}).`
-            : `${noun} did not succeed.`,
+        description: reason ?? `${noun} did not succeed.`,
         includeLogsButton: true,
     }
 }
 
-function isSuccessStatus(status: unknown): boolean {
-    if (typeof status === "number") {
-        // observed Render numeric codes for success
-        return status === 1 || status === 4
+function isFailedDetail(details: any): boolean {
+    if (!details || typeof details !== "object") return false
+    for (const [key, value] of Object.entries(details)) {
+        if (key !== "status" && !/Status$/.test(key)) continue
+        if (typeof value !== "string") continue
+        if (/fail|cancel/i.test(value)) return true
     }
-    const s = String(status ?? "").toLowerCase()
-    return s === "succeeded" || s === "success" || s === "live" || s === "deactivated"
+    return false
 }
 
-function isInProgressStatus(status: unknown): boolean {
-    if (typeof status === "number") {
-        return status === 2 || status === 3 || status === 9
-    }
-    const s = String(status ?? "").toLowerCase()
-    return s === "created" || s.includes("in_progress") || s === "building"
-}
-
-function describeServerFailure(reason: any): string {
-    if (!reason) return "Failed for unknown reason"
-    if (reason.nonZeroExit) return `Exited with status ${reason.nonZeroExit}`
-    if (reason.oomKilled) return "Out of Memory"
-    if (reason.timedOutSeconds) return `Timed out ${reason.timedOutReason ?? ""}`.trim()
-    if (reason.unhealthy) return String(reason.unhealthy)
-    return "Failed for unknown reason"
+function describeFailureReason(reason: any): string | undefined {
+    if (!reason || typeof reason !== "object") return undefined
+    // Render nests the runtime failure under `reason.failure`; fall back to
+    // top-level fields for backwards compat with older payloads.
+    const f = reason.failure ?? reason
+    if (f.nonZeroExit) return `Exited with status ${f.nonZeroExit}`
+    if (f.oomKilled) return "Out of memory"
+    if (f.timedOutSeconds) return `Timed out${f.timedOutReason ? ` (${f.timedOutReason})` : ""}`
+    if (f.unhealthy) return String(f.unhealthy)
+    if (f.evicted) return "Container evicted"
+    if (reason.buildFailed?.id) return String(reason.buildFailed.id)
+    return undefined
 }
 
 async function sendNotification(kind: ResourceKind, resource: RenderResource | undefined, notification: Notification) {
